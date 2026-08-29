@@ -16,52 +16,55 @@ export interface DraftState {
   error?: string | null;
   owner?: string | null;
   updatedAt?: number;
+  draftId?: string | null;
 }
 
-export function reduce(state: DraftState | undefined, event: any): DraftState {
-  const s: DraftState = state ?? { status: 'draft' } as DraftState;
+export type DraftEvent =
+  | { type: 'START'; draftId?: string; step?: number; data?: unknown }
+  | { type: 'EDIT'; draftId?: string; step?: number; data?: unknown }
+  | { type: 'SUBMIT'; id: string }
+  | { type: 'SUCCESS'; id: string }
+  | { type: 'FAILURE'; id: string; error?: string }
+  | { type: 'CANCEL' }
+  | { type: 'RETRY' }
+  | { type: 'RECOVER'; from?: Partial<DraftState> }
+  | { type: 'RESUME'; draftId: string; step: number; data: unknown };
+
+export function reduce(state: DraftState | undefined, event: DraftEvent): DraftState {
+  const s: DraftState = state ?? ({ status: 'draft' } as DraftState);
   const n = Date.now();
-  const ok = (patch: Partial<DraftState>):$DraftState => ({ ...s, ...patch, updatedAt: n });
+  const ok = (patch: Partial<DraftState>): DraftState => ({ ...s, ...patch, updatedAt: n });
 
   switch (event.type) {
     case 'START':
-      // Starting a new draft must not clobber an active submission or confirmed commitment.
       if (s.status === 'submitting' || s.status === 'confirmed') return s;
-      return ok({
-        status: 'draft',
-        step: event.step,
-        data: event.data,
-        id: null,
-        error: null,
-      });
+      return ok({ status: 'draft', draftId: event.draftId ?? s.draftId, step: event.step, data: event.data, id: null, error: null });
+
+    case 'EDIT':
+      if (s.status !== 'draft' && s.status !== 'cancelled') return s;
+      return ok({ status: 'draft', draftId: event.draftId ?? s.draftId, step: event.step ?? s.step, data: event.data !== undefined ? event.data : s.data });
 
     case 'SUBMIT':
-      // Only allow submit from draft or failed, and never without a unique submission id.
       if ((s.status === 'draft' || s.status === 'failed') && !s.id && event.id) {
         return ok({ status: 'submitting', id: event.id, error: null });
       }
       return s;
 
     case 'SUCCESS':
-      // Stale or mismatched success events must be ignored.
       if (s.status === 'submitting' && s.id === event.id) {
         return ok({ status: 'confirmed' });
       }
       return s;
 
     case 'FAILURE':
-      // Stale or mismatched failure events must be ignored.
       if (s.status === 'submitting' && s.id === event.id) {
         return ok({ status: 'failed', error: event.error || 'Commitment failed', id: null });
       }
       return s;
 
     case 'CANCEL':
-      // Cancellation is allowed from any non-final state (not confirmed).
-      if (s.status === 'draft' || s.status === 'submitting' || s.status === 'failed') {
-        return ok({ status: 'cancelled', id: null });
-      }
-      return s;
+      if (s.status === 'confirmed') return s;
+      return ok({ status: 'cancelled', id: null });
 
     case 'RETRY':
       if (s.status === 'failed') {
@@ -69,13 +72,14 @@ export function reduce(state: DraftState | undefined, event: any): DraftState {
       }
       return s;
 
-    case 'RECOVER':
-      // Do not override an in-flight or already confirmed state.
+    case 'RESUME':
+      if (s.status === 'submitting' || s.status === 'confirmed') return s;
+      return ok({ status: 'draft', draftId: event.draftId, step: event.step, data: event.data, id: null, error: null });
+
+    case 'RECOVER:':
       if (s.status === 'submitting' || s.status === 'confirmed') return s;
       const from = event.from;
       if (from && typeof from === 'object') {
-        // If the previous state was 'submitting', we cannot know whether the on-chain
-        // action completed, so convert to 'failed' to force explicit user verification.
         const recoveredStatus = from.status === 'submitting' ? 'failed' : (from.status || 'draft');
         const recoveredError = from.status === 'submitting' ? 'recovered' : from.error;
         return ok({
@@ -85,6 +89,7 @@ export function reduce(state: DraftState | undefined, event: any): DraftState {
           owner: from.owner ?? s.owner,
           id: null,
           error: recoveredError,
+          draftId: from.draftId ?? s.draftId,
         });
       }
       return s;
