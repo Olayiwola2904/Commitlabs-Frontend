@@ -174,6 +174,13 @@ export default function CreateCommitment() {
     setSubmitError(null);
     clearDraft();
     setShowResumePrompt(false);
+    setSelectedType(null);
+    setCommitmentType('balanced');
+    setAmount('');
+    setAsset('XLM');
+    setDurationDays(90);
+    setMaxLossPercent(100);
+    setStep(1);
   };
 
   useEffect(() => {
@@ -280,7 +287,13 @@ export default function CreateCommitment() {
   // Navigation handlers
   // Note: These control the wizard step flow
   const handleBack = () => {
-    if (isSubmitting) return;
+    if (submitStatusRef.current === 'submitting' || isSubmitting) {
+      // Cancel any in-flight submission to avoid stale completion.
+      submissionEpoch.current += 1;
+      setIsSubmitting(false);
+      suppressDraftSave.current = false;
+      updateSubmitStatus('idle');
+    }
     setSubmitError(null);
     updateSubmitStatus('idle');
     if (step > 1) {
@@ -304,27 +317,44 @@ export default function CreateCommitment() {
       updateSubmitStatus('error');
       return;
     }
+    if (!walletAddress) {
+      setSubmitError('Connect your wallet to create a commitment.');
+      updateSubmitStatus('error');
+      return;
+    }
+    setSubmitError(null);
+    if (!updateSubmitStatus('submitting')) return;
     suppressDraftSave.current = true;
     submissionEpoch.current += 1;
     const currentEpoch = submissionEpoch.current;
-    setSubmitError(null);
-    if (!updateSubmitStatus('submitting')) return;
     setIsSubmitting(true);
-    setTimeout(() => {
-      if (!isMounted.current || submissionEpoch.current !== currentEpoch) {
-        return;
-      }
-      setIsSubmitting(false);
-      const newCommitmentId = generateCommitmentId();
-      setCommitmentId(newCommitmentId);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('commitlabs:created-commitment', 'true');
-      }
-      updateSubmitStatus('success');
-      setShowSuccessModal(true);
-      suppressDraftSave.current = false;
-      clearDraft();
-    }, 2000);
+
+    new Promise<string>((resolve) => {
+      setTimeout(() => {
+        // Simulated on-chain submission. Replace with real contract interaction.
+        // If the wallet rejects the transaction, reject with an error.
+        resolve(generateCommitmentId());
+      }, 2000);
+    })
+      .then((newCommitmentId) => {
+        if (!isMounted.current || submissionEpoch.current !== currentEpoch) return;
+        setIsSubmitting(false);
+        setCommitmentId(newCommitmentId);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('commitlabs:created-commitment', 'true');
+        }
+        updateSubmitStatus('success');
+        setShowSuccessModal(true);
+        suppressDraftSave.current = false;
+        clearDraft();
+      })
+      .catch((error: Error) => {
+        if (!isMounted.current || submissionEpoch.current !== currentEpoch) return;
+        setIsSubmitting(false);
+        setSubmitError(error.message);
+        updateSubmitStatus('error');
+        suppressDraftSave.current = false;
+      });
   };
 
   const handleViewCommitment = () => {
@@ -358,6 +388,8 @@ export default function CreateCommitment() {
   const handleFundLater = () => {
     setShowSuccessModal(false);
     const numericId = commitmentId.split('-')[1] || '1';
+    router.push(`/commitments/${numericId}`);
+  };entId.split('-')[1] || '1';
     router.push(`/commitments/${numericId}`);
   };
 
