@@ -21,6 +21,11 @@ type CommitmentType = 'safe' | 'balanced' | 'aggressive';
 
 type SubmitStatus = 'idle' | 'submitting' | 'success' | 'error';
 
+// Submission state machine invariants:
+// - idle is the resting state; submitting may only be entered from idle or error.
+// - success is terminal, clears the draft and prevents duplicate submissions.
+// - error is recoverable, preserves the draft, and allows retry from the same state.
+// - Any cancellation (back navigation) invalidates in-flight responses by incrementing the epoch.
 const SUBMIT_TRANSITIONS: Record<SubmitStatus, ReadonlyArray<SubmitStatus>> = {
   idle: ['submitting', 'error'],
   submitting: ['success', 'error', 'idle'],
@@ -93,6 +98,7 @@ export default function CreateCommitment() {
   const submissionEpoch = useRef(0);
   const suppressDraftSave = useRef(false);
   const isMounted = useRef(true);
+  const wasSubmittingRef = useRef(false);
 
   // In production this would come from the connected wallet hook.
   // Passed as undefined while wallet integration is pending; the fund
@@ -113,6 +119,16 @@ export default function CreateCommitment() {
     setSubmitStatus(next);
     return true;
   };
+
+  useEffect(() => {
+    if (submitStatus === 'error' && isSubmitting) {
+      setIsSubmitting(false);
+    }
+    if (wasSubmittingRef.current && submitStatus === 'error') {
+      suppressDraftSave.current = false;
+    }
+    wasSubmittingRef.current = isSubmitting && submitStatus === 'submitting';
+  }, [isSubmitting, submitStatus]);
 
   useEffect(() => {
     if (draft) {
@@ -185,6 +201,9 @@ export default function CreateCommitment() {
 
   useEffect(() => {
     if (suppressDraftSave.current || showSuccessModal || isSubmitting) {
+      return;
+    }
+    if (step === 1 && !selectedType) {
       return;
     }
     const currentDraft: DraftState = {
@@ -292,7 +311,6 @@ export default function CreateCommitment() {
       submissionEpoch.current += 1;
       setIsSubmitting(false);
       suppressDraftSave.current = false;
-      updateSubmitStatus('idle');
     }
     setSubmitError(null);
     updateSubmitStatus('idle');
@@ -305,6 +323,11 @@ export default function CreateCommitment() {
 
   const handleSubmit = () => {
     if (isSubmitting || showSuccessModal || submitStatusRef.current === 'submitting' || submitStatusRef.current === 'success') {
+      return;
+    }
+    if (showResumePrompt) {
+      setSubmitError('Resume or discard your existing draft before creating a new commitment.');
+      updateSubmitStatus('error');
       return;
     }
     if (!selectedType) {
