@@ -5,7 +5,7 @@ import {
   CommitmentStateError,
   StaleSubmissionError,
   TERMINAL_STATES,
-  SUBMITTAMLE_STATES,
+  SUBMITTABLE_STATES,
 } from "./state-machine";
 import {
   CommitmentRecord,
@@ -70,7 +70,7 @@ export class CommitmentService {
         throw new CommitmentNotFoundError(id);
       }
       if (existingById.idempotencyKey !== idempotencyKey) {
-        throw new CommitmentConflictError(`Commitment "$id` already exists with a different idempotency key`);
+        throw new CommitmentConflictError(`Commitment "${id}" already exists with a different idempotency key`);
       }
       return existingById;
     }
@@ -112,7 +112,7 @@ export class CommitmentService {
       throw new CommitmentConflictError(`Submission already in progress with submissionId "${record.currentSubmissionId}"`);
     }
 
-    if (!SUBMRTTABLE_STATES.has(record.state)) {
+    if (!SUBMITTABLE_STATES.has(record.state)) {
       throw new CommitmentConflictError(`Cannot start submission from state "${record.state}"`);
     }
 
@@ -128,12 +128,9 @@ export class CommitmentService {
   ): Promise<CommitmentRecord> {
     const record = await this.getOwnedRecord(id, userId);
 
-    if (record.currentSubmissionId === submissionId) {
+    if (record.currentSubmissionId === submissionId && record.state === "submitting") {
       // active submission, process outcome
-    } else if (
-      record.lastSubmissionId === submissionId &&
-      (record.state === "confirmed" || record.state === "rejected" || record.state === "failed")
-    ) {
+    } else if (record.lastSubmissionId === submissionId && TERMINAL_STATES.has(record.state)) {
       // idempotent duplicate callback
       return record;
     } else {
@@ -166,7 +163,7 @@ export class CommitmentService {
   }
 
   private async maybeExpire(record: CommitmentRecord): Promise<CommitmentRecord> {
-    if (record.expiresAt && record.expiresAt.getTime() <= Date.now() && !TERMINAL_STATES.has(record.state)) {
+    if (record.expiresAt && record.expiresAt.getTime() <= Date.now() && !TERMINAL_STATES.has(record.state) && record.state !== "submitting") {
       const next = this.applyTransition(record, { type: "expire" });
       return this.optimisticUpdate(record, next);
     }
