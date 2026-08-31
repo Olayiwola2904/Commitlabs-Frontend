@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { fail, ok, methodNotAllowed } from '@/lib/backend/apiResponse';
@@ -10,37 +11,85 @@ import { logInfo, logWarn } from '@/lib/backend/logger';
 import { MAX_PAGE_SIZE } from '@/lib/backend/pagination';
 import { checkRateLimit, getRateLimitWindowSeconds } from '@/lib/backend/rateLimit';
 import { requireAuth } from '@/lib/backend/requireAuth';
-import { getUserCommitmentsFromChain, createCommitmentOnCain } from '@/lib/backend/services/contracts';
+import { getUserCommitmentsFromChain, createCommitmentOnChain } from '@/lib/backend/services/contracts';
 import { validateSupportedAsset, validateStellarAddress } from '@/lib/backend/validation';
 import { withApiHandler } from '@/lib/backend/withApiHandler';
 
 const MAX_CHAIN_COMMITMENTS_PROCESSED = 5000;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
-type IdempotencyEntry = { status: 'PENDING' | 'SUCCESS' | 'FAILED'; result?: unknown; error?: { code: string; message: string; status: number }; expiresAt: number };
+const PENDING_TTL_MS = 10 * 60 * 1000;
+const UNKNOWN_TTL_MS = 60 * 60 * 1000;
+type IdempotencyStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'UNKNOWN';
+type IdempotencyEntry = {
+  status: IdempotencyStatus;
+  requestHash: string;
+  result?: unknown;
+  error?: { code: string; message: string; status: number };
+  expiresAt: number;
+};
 const idempotencyStore = new Map<string, IdempotencyEntry>();
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(',')}}`;
+}
+
+function hashRequestPayload(payload: unknown): string {
+  return createHash('sha256').update(stableStringify(payload ?? {})).digest('hex');
+}
 
 function getIdempotency(key: string): IdempotencyEntry | undefined {
   const now = Date.now();
   const entry = idempotencyStore.get(key);
-  if (entry && entry.expiresAt <= now) { idempotencyStore.delete(key); return undefined; }
+  if (!entry) return undefined;
+  if (entry.expiresAt <= now) {
+    if (entry.status === 'PENDING') {
+      const unknownEntry: IdempotencyEntry = {
+        ...entry,
+        status: 'UNKNOWN',
+        expiresAt: now + UNKNOWN_TTL_MS,
+      };
+      idempotencyStore.set(key, unknownEntry);
+      return unknownEntry;
+    }
+    idempotencyStore.delete(key);
+    return undefined;
+  }
   return entry;
 }
-function setSuccess(key: string, result: unknown) { idempotencyStore.set(key, { status: 'SUCCESS', result, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS }); }
-function setFailure(key: string, error: { code: string; message: string; status: number }) { idempotencyStore.set(key, { status: 'FAILED', error, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS }); }
+function setPending(key: string, requestHash: string) {
+  idempotencyStore.set(key, { status: 'PENDING', requestHash, expiresAt: Date.now() + PENDING_TTL_MS });
+}
+function setSuccess(key: string, requestHash: string, result: unknown) {
+  idempotencyStore.set(key, { status: 'SUCCESS', requestHash, result, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
+}
+function setFailure(key: string, requestHash: string, error: { code: string; message: string; status: number }) {
+  idempotencyStore.set(key, { status: 'FAILED', requestHash, error, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
+}
+function setUnknown(key: string, requestHash: string, error: { code: string; message: string; status: number }) {
+  idempotencyStore.set(key, { status: 'UNKNOWN', requestHash, error, expiresAt: Date.now() + UNKNOWN_TTL_MS });
+}
+function isAmbiguousCommitmentError(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  const message = error.message.toLowerCase();
+  return /timeout|network|connection|socket|abort|unavailable|nonce|sequence|broadcast|unknown/i.test(message);
+}
 
 const QuerySchema = z.object({
   ownerAddress: z.string().min(1),
-  page: z.coerce(number().int().min(1).default(1),
-  pageSize: z.coerce(number().int().min(1).max(MAX_PAGE_SIZE).default(10),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(10),
   status: z.enum(['ACTIVE', 'SETTLED', 'VIOLATED', 'EARLY_EXIT', 'UNKNOWN']).optional(),
   type: z.string().optional(),
-  minCompliance: z.coerce(number().min(0).max(100).optional(),
+  minCompliance: z.coerce.number().min(0).max(100).optional(),
 });
 
 const CreateSchema = z.object({
   ownerAddress: z.string().min(1),
   asset: z.string().min(1),
-  amount: z.string().min(1).regex(/^\d+(?\.\d+)?$/, 'Invalid amount').refine((v) => Number(v) > 0, 'Invalid amount'),
+  amount: z.string().min(1).regex(/^\d+(?:\.\d+)?$/, 'Invalid amount').refine((v) => Number(v) > 0, 'Invalid amount'),
   durationDays: z.number().int().positive().max(36500, 'Invalid durationDays'),
   maxLossBps: z.number().int().min(0).max(10000, 'Invalid maxLossBps'),
   metadata: z.record(z.unknown()).optional(),
