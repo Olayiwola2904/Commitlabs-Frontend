@@ -23,7 +23,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function requireString(value: unknown, name: string, maxLength: number, pattern?: RegExp): string {
   if (typeof value !== "string") {
-    throw new ApiValidationError(`${name} must be a strinc`, { field: name });
+    throw new ApiValidationError(`${name} must be a string`, { field: name });
   }
   const trimmed = value.trim();
   if (trimmed.length === 0) {
@@ -41,7 +41,7 @@ function requireString(value: unknown, name: string, maxLength: number, pattern?
 function optionalString(value: unknown, name: string, maxLength: number, pattern?: RegExp): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") {
-    throw new ApiValidationError(`${name} must be a strinc`, { field: name });
+    throw new ApiValidationError(`${name} must be a string`, { field: name });
   }
   const trimmed = value.trim();
   if (trimmed.length === 0) return undefined;
@@ -66,7 +66,7 @@ function parseOptionalDate(value: unknown, name: string): Date | undefined {
   return date;
 }
 
-function assertEnum<T { extends string }(value: unknown, name: string, allowed: readonly T[]): T {
+function assertEnum<T extends string>(value: unknown, name: string, allowed: readonly T[]): T {
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
     throw new ApiValidationError(`${name} must be one of: ${allowed.join(", ")}`, { field: name });
   }
@@ -94,16 +94,16 @@ export interface SubmitCommitmentInput {
   action: "submit";
   id: string;
   submissionId: string;
-  idempotencyKey?: string;
-  expectedState?: CommitmentState;
+  idempotencyKey: string;
+  expectedState: CommitmentState;
 }
 
 export interface ResolveCommitmentInput {
   action: "resolve";
   id: string;
   submissionId: string;
-  idempotencyKey?: string;
-  expectedState?: CommitmentState;
+  idempotencyKey: string;
+  expectedState: CommitmentState;
   outcome:
     | { type: "success"; txHash: string }
     | { type: "reject"; reason?: string }
@@ -113,8 +113,8 @@ export interface ResolveCommitmentInput {
 export interface CancelCommitmentInput {
   action: "cancel";
   id: string;
-  idempotencyKey?: string;
-  expectedState?: CommitmentState;
+  idempotencyKey: string;
+  expectedState: CommitmentState;
   reason?: string;
 }
 
@@ -149,15 +149,15 @@ export function validateCommitmentAction(input: unknown): CommitmentActionInput 
   if (action === "submit") {
     const id = requireString(input.id, "id", 128, ID_PATTERN);
     const submissionId = requireString(input.submissionId, "submissionId", 255, KEY_PATTERN);
-    const idempotencyKey = optionalString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
-    const expectedState = optionalState(input.expectedState, "expectedState");
+    const idempotencyKey = requireString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
+    const expectedState = assertEnum(input.expectedState, "expectedState", ["draft", "submitted"] as const);
     return { action, id, submissionId, idempotencyKey, expectedState };
   }
   if (action === "resolve") {
     const id = requireString(input.id, "id", 128, ID_PATTERN);
     const submissionId = requireString(input.submissionId, "submissionId", 255, KEY_PATTERN);
-    const idempotencyKey = optionalString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
-    const expectedState = optionalState(input.expectedState, "expectedState");
+    const idempotencyKey = requireString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
+    const expectedState = assertEnum(input.expectedState, "expectedState", ["submitted", "resolved"] as const);
     if (!isRecord(input.outcome)) {
       throw new ApiValidationError("outcome must be an object", { field: "outcome" });
     }
@@ -178,8 +178,8 @@ export function validateCommitmentAction(input: unknown): CommitmentActionInput 
   }
   if (action === "cancel") {
     const id = requireString(input.id, "id", 128, ID_PATTERN);
-    const idempotencyKey = optionalString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
-    const expectedState = optionalState(input.expectedState, "expectedState");
+    const idempotencyKey = requireString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
+    const expectedState = assertEnum(input.expectedState, "expectedState", ["draft", "submitted", "cancelled"] as const);
     const reason = optionalString(input.reason, "reason", 500);
     return { action, id, idempotencyKey, expectedState, reason };
   }
