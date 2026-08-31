@@ -14,6 +14,8 @@ export class ApiValidationError extends Error {
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const KEY_PATTERN = /^[A-Za-z0-9_-]{1,255}$/;
 const TYPES: readonly CommitmentType[] = ["Safe", "Balanced", "Aggressive"];
+const STATES = ["draft", "submitted", "resolved", "cancelled"] as const;
+export type CommitmentState = (typeof STATES)[number];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -71,6 +73,14 @@ function assertEnum<T { extends string }(value: unknown, name: string, allowed: 
   return value as T;
 }
 
+function optionalState(value: unknown, name: string): CommitmentState | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !(STATES as readonly string[]).includes(value)) {
+    throw new ApiValidationError(`${name} must be one of: ${STATES.join(", ")}`, { field: name });
+  }
+  return value as CommitmentState;
+}
+
 export interface CreateCommitmentInput {
   id: string;
   idempotencyKey: string;
@@ -84,12 +94,16 @@ export interface SubmitCommitmentInput {
   action: "submit";
   id: string;
   submissionId: string;
+  idempotencyKey?: string;
+  expectedState?: CommitmentState;
 }
 
 export interface ResolveCommitmentInput {
   action: "resolve";
   id: string;
   submissionId: string;
+  idempotencyKey?: string;
+  expectedState?: CommitmentState;
   outcome:
     | { type: "success"; txHash: string }
     | { type: "reject"; reason?: string }
@@ -99,6 +113,8 @@ export interface ResolveCommitmentInput {
 export interface CancelCommitmentInput {
   action: "cancel";
   id: string;
+  idempotencyKey?: string;
+  expectedState?: CommitmentState;
   reason?: string;
 }
 
@@ -133,40 +149,46 @@ export function validateCommitmentAction(input: unknown): CommitmentActionInput 
   if (action === "submit") {
     const id = requireString(input.id, "id", 128, ID_PATTERN);
     const submissionId = requireString(input.submissionId, "submissionId", 255, KEY_PATTERN);
-    return { action, id, submissionId };
+    const idempotencyKey = optionalString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
+    const expectedState = optionalState(input.expectedState, "expectedState");
+    return { action, id, submissionId, idempotencyKey, expectedState };
   }
   if (action === "resolve") {
     const id = requireString(input.id, "id", 128, ID_PATTERN);
     const submissionId = requireString(input.submissionId, "submissionId", 255, KEY_PATTERN);
+    const idempotencyKey = optionalString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
+    const expectedState = optionalState(input.expectedState, "expectedState");
     if (!isRecord(input.outcome)) {
       throw new ApiValidationError("outcome must be an object", { field: "outcome" });
     }
     const type = requireString(input.outcome.type, "outcome.type", 20);
     if (type === "success") {
       const txHash = requireString(input.outcome.txHash, "outcome.txHash", 128);
-      return { action, id, submissionId, outcome: { type: "success", txHash } };
+      return { action, id, submissionId, idempotencyKey, expectedState, outcome: { type: "success", txHash } };
     }
     if (type === "reject") {
       const reason = optionalString(input.outcome.reason, "outcome.reason", 500);
-      return { action, id, submissionId, outcome: { type: "reject", reason } };
+      return { action, id, submissionId, idempotencyKey, expectedState, outcome: { type: "reject", reason } };
     }
     if (type === "error") {
       const error = requireString(input.outcome.error, "outcome.error", 500);
-      return { action, id, submissionId, outcome: { type: "error", error } };
+      return { action, id, submissionId, idempotencyKey, expectedState, outcome: { type: "error", error } };
     }
     throw new ApiValidationError("outcome.type must be success, reject, or error", { field: "outcome.type" });
   }
   if (action === "cancel") {
     const id = requireString(input.id, "id", 128, ID_PATTERN);
+    const idempotencyKey = optionalString(input.idempotencyKey, "idempotencyKey", 255, KEY_PATTERN);
+    const expectedState = optionalState(input.expectedState, "expectedState");
     const reason = optionalString(input.reason, "reason", 500);
-    return { action, id, reason };
+    return { action, id, idempotencyKey, expectedState, reason };
   }
   throw new ApiValidationError("action must be one of: create, submit, resolve, cancel", { field: "action" });
 }
 
 export interface SearchCommitmentsInput {
   query: string;
-  state?: string;
+  state?: CommitmentState;
 }
 
 export function validateSearchParams(params: unknown): SearchCommitmentsInput {
@@ -174,6 +196,6 @@ export function validateSearchParams(params: unknown): SearchCommitmentsInput {
     throw new ApiValidationError("Search parameters must be an object");
   }
   const query = optionalString(params.q ?? params.query, "q", 100) ?? "";
-  const state = optionalString(params.state, "state", 20);
+  const state = optionalState(params.state, "state");
   return { query, state };
 }
