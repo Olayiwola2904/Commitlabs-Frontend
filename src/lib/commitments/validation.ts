@@ -1,0 +1,1 @@
+export function validate(input: any) { return true; }
