@@ -90,7 +90,7 @@ const MAX_PAGE_SIZE = 100;
 /**
  * Maximum number of concurrent in-flight search requests permitted across
  * the server process.  Requests that arrive while the ceiling is reached
- * are rejected with 429 rather than queuing unboundedly.
+ * are rejected with 429 rather than queueing unboundedly.
  *
  * Invariant I9: enforced at the start of the handler before any expensive
  * work (chain read, cache lookup).
@@ -773,20 +773,20 @@ export const GET = withApiHandler(
       truncated,
     });
 
-      const response = ok(responsePayload, undefined, 200, correlationId);
+    const response = ok(responsePayload, undefined, 200, correlationId);
 
-      // ── Invariant I7: telemetry headers on chain response ─────────────────
-      attachTelemetryHeaders(response, {
-        durationMs: Date.now() - startedAt,
-        chainDurationMs,
-        cacheHit: false,
-        returnedCount: result.data.length,
-        total: result.meta.total,
-        filteredCount: items.length,
-        truncated,
-      });
+    // ── Invariant I7: telemetry headers on chain response ─────────────────
+    attachTelemetryHeaders(response, {
+      durationMs: Date.now() - startedAt,
+      chainDurationMs,
+      cacheHit: false,
+      returnedCount: result.data.length,
+      total: result.meta.total,
+      filteredCount: items.length,
+      truncated,
+    });
 
-      return response;
+    return response;
     } finally {
       // Always decrement the semaphore regardless of success or error.
       if (counted) {
