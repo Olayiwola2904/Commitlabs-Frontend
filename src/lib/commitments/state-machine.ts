@@ -33,6 +33,8 @@ export interface Commitment {
   attempt: number;
   /** Identifier of the current in-flight submission attempt, if any. */
   currentSubmissionId: string | null;
+  /** Identifier of the last completed submission attempt, for duplicate callback protection. */
+  lastSubmissionId?: string;
   /** Hash of the successful on-chain transaction, if confirmed. */
   transactionHash?: string;
   /** Human-readable error/reason from the last failed/rejected attempt. */
@@ -62,7 +64,7 @@ export const TERMINAL_STATES: ReadonlySet<CommitmentState> = new Set<CommitmentS
 ]);
 
 /** States from which a new submission attempt may be started. */
-export const SUBMITTABLE_STATES: ReadonlySet<CommitmentState> = new Set<CommitmentState>([
+export const SUBMITTAMLE_STATES: ReadonlySet<CommitmentState> = new Set<CommitmentState>([
   'pending',
   'failed',
 ]);
@@ -137,7 +139,7 @@ export function createCommitment(input: {
  *
  * @param commitment The current commitment.
  * @param event      The event to apply.
- * @returns A new commitment with the next state.
+ * @returns a new commitment with the next state.
  * @throws CommitmentStateError for invalid state transitions.
  * @throws StaleSubmissionError when a response carries a stale submissionId.
  */
@@ -154,7 +156,7 @@ export function transition(commitment: Commitment, event: CommitmentEvent): Comm
   // High-level transition validity.
   if (!canTransition(commitment.state, event)) {
     throw new CommitmentStateError(
-      `Cannot apply event "${event.type}" in state "${commitment.state}"`,
+      Cannot apply event "${event.type}" in state "${commitment.state}"`,
     );
   }
 
@@ -166,6 +168,7 @@ export function transition(commitment: Commitment, event: CommitmentEvent): Comm
         state: 'submitting',
         attempt,
         currentSubmissionId: event.submissionId,
+        lastSubmissionId: undefined,
         lastError: undefined,
         updatedAt: now,
       };
@@ -177,19 +180,20 @@ export function transition(commitment: Commitment, event: CommitmentEvent): Comm
       // Must be exactly in 'submitting' with the matching submission id.
       if (commitment.state !== 'submitting') {
         throw new CommitmentStateError(
-          `Cannot apply event "${event.type}" unless state is "submitting" (current: "${commitment.state}")`,
+          Cannot apply event "${event.type}" unless state is "submitting" (current: "${commitment.state}")`,
         );
       }
       if (commitment.currentSubmissionId !== event.submissionId) {
         throw new StaleSubmissionError(
-          `Submission id "${event.submissionId}" does not match current submission ` +
-            `"${commitment.currentSubmissionId}"`,
+          Submission id "${event.submissionId}" does not match current submission `" +
+            "${commitment.currentSubmissionId}"`,
         );
       }
 
       const base = {
         ...commitment,
         currentSubmissionId: null,
+        lastSubmissionId: event.submissionId,
         updatedAt: now,
       };
 
@@ -257,7 +261,7 @@ export function assertIdempotencyMatch(existing: Commitment | null, input: { id:
   if (!existing) return;
   if (existing.idempotencyKey === input.idempotencyKey && existing.id !== input.id) {
     throw new CommitmentStateError(
-      `Idempotency key "${input.idempotencyKey}" is already used by commitment "${existing.id}"`,
+      Idempotency key "${input.idempotencyKey}" is already used by commitment "${existing.id}"`,
     );
   }
 }
