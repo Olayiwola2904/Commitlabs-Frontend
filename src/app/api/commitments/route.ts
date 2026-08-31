@@ -101,25 +101,35 @@ export const POST = withApiHandler(
     if (!(await checkRateLimit(ip, 'api/commitments/create'))) throw new TooManyRequestsError('Too many requests. Please try again later.', undefined, getRateLimitWindowSeconds('api/commitments/create'));
     const idempotencyKey = req.headers.get('Idempotency-Key');
     if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 255) return fail('BAD_REQUEST', 'Idempotency-Key header is required and must be between 8 and 255 characters', undefined, 400, correlationId);
-    const existing = getIdempotency(idempotencyKey);
-    if (existing?.status === 'PENDING') return fail('CONFLICT', 'A request with this Idempotency-Key is already being processed. Retry after a moment.', undefined, 409, correlationId);
-    if (existing?.status === 'SUCCESS') return ok(existing.result, undefined, 200, correlationId);
-    if (existing?.status === 'FAILED') return fail(existing.error!.code as any, existing.error!.message, undefined, existing.error!.status, correlationId);
-    idempotencyStore.set(idempotencyKey, { status: 'PENDING', expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
     const parsed = await parseJsonWithLimit(req, { limitBytes: JSON_BODY_LIMITS.commitmentsCreate });
+    const requestHash = hashRequestPayload(parsed ?? {});
+    const existing = getIdempotency(idempotencyKey);
+    if (existing) {
+      if (existing.requestHash !== requestHash) return fail('CONFLICT', 'Idempotency-Key was already used with a different request payload', undefined, 409, correlationId);
+      if (existing.status === 'PENDING') return fail('CONFLICT', 'A request with this Idempotency-Key is already being processed. Retry after a moment.', undefined, 409, correlationId);
+      if (existing.status === 'SUCCESS') return ok(existing.result, undefined, 200, correlationId);
+      if (existing.status === 'FAILED') return fail(existing.error!.code as any, existing.error!.message, undefined, existing.error!.status, correlationId);
+      return fail('CONFLICT', 'The previous request outcome is unknown. Review on-chain state before retrying.', undefined, 409, correlationId);
+    }
     const bodyResult = CreateSchema.safeParse(parsed ?? {});
-    if (!bodyResult.success) { idempotencyStore.delete(idempotencyKey); throw new ValidationError('Invalid request body', bodyResult.error.issues); }
+    if (!bodyResult.success) throw new ValidationError('Invalid request body', bodyResult.error.issues);
     const { ownerAddress, asset, amount, durationDays, maxLossBps, metadata } = bodyResult.data;
     try { validateSupportedAsset(asset, 'asset'); } catch { throw new ValidationError('Asset is not supported. Supported assets: XLM, USDC.'); }
     try { validateStellarAddress(ownerAddress, 'ownerAddress'); } catch { throw new ValidationError('Invalid ownerAddress: must be a valid Stellar address (G... format).'); }
+    setPending(idempotencyKey, requestHash);
     let result;
     try {
       result = await createCommitmentOnChain({ ownerAddress, asset, amount, durationDays, maxLossBps, ...(metadata !== undefined ? { metadata } : {}) }, { requestId: correlationId });
     } catch (error) {
-      setFailure(idempotencyKey, { code: 'INTERNAL', message: error instanceof Error ? error.message : 'Commitment creation failed', status: 500 });
+      const errorResponse = { code: 'INTERNAL', message: error instanceof Error ? error.message : 'Commitment creation failed', status: 500 };
+      if (isAmbiguousCommitmentError(error)) {
+        setUnknown(idempotencyKey, requestHash, errorResponse);
+      } else {
+        setFailure(idempotencyKey, requestHash, errorResponse);
+      }
       throw error;
     }
-    setSuccess(idempotencyKey, result);
+    setSuccess(idempotencyKey, requestHash, result);
     return ok(result, undefined, 201, correlationId);
   },
   { cors: COMMITMENTS_CORS_POLICY },
