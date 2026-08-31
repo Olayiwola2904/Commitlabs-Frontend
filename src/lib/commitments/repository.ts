@@ -25,7 +25,7 @@ export class DuplicateIdempotencyError extends Error {
     public readonly idempotencyKey: string,
     public readonly userId: string,
   ) {
-    super(`Commitment with idempotency key ${idempotencyKey} already exists for user ${userId}`);
+    super(`Commitment with idempotence key ${idempotencyKey} already exists for user ${userId}`);
     this.name = "DuplicateIdempotencyError";
   }
 }
@@ -56,6 +56,9 @@ const ALLOWED_TRANSITIONS: Readonly<Record<string, ReadonlySet<string>> = {
   rejected: new Set(["submitted"]),
   cancelled: new Set(),
 };
+
+const INITIAL_STATE = "pending";
+const MAX_SEARCH_RESULTS = 100;
 
 export interface CommitmentRepository {
   findById(id: string): Promise<CommitmentRecord | null>;
@@ -95,6 +98,9 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
     if (!record.state || typeof record.state !== "string") {
       throw new Error("Commitment state is required");
     }
+    if (!VALID_STATES.has(record.state)) {
+      throw new InvalidStateTransitionError(record.id, "", record.state);
+    }
   }
 
   private assertValidTransition(id: string, fromState: string, toState: string): void {
@@ -107,17 +113,34 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
     }
   }
 
+  private assertImmutableFields(current: CommitmentRecord, next: CommitmentRecord): void {
+    for (const field of ["type", "asset", "amount"] as const) {
+      if (!Object.is(current[field], next[field])) {
+        throw new Error(`Commitment ${current.id} ${field} cannot be changed`);
+      }
+    }
+  }
+
+  private assertIdempotentPayload(existing: CommitmentRecord, incoming: CommitmentRecord): void {
+    for (const field of ["type", "asset", "amount"] as const) {
+      if (!Object.is(existing[field], incoming[field])) {
+        throw new DuplicateIdempotencyError(existing.idempotencyKey, existing.userId);
+      }
+    }
+  }
+
   async create(record: CommitmentRecord): Promise<CommitmentRecord> {
     this.assertValidRecord(record);
 
-    if (!VALID_STATES.has(record.state)) {
-      throw new InvalidStateTransitionError(record.id, "", record.state);
+    if (record.state !== INITIAL_STATE) {
+      throw new InvalidStateTransitionError(record.id, "<new>", record.state);
     }
 
     // Idempotent creation: if the same user retries with the same idempotency key,
     // return the existing commitment instead of creating a duplicate.
     const existing = await this.findByIdempotencyKey(record.idempotencyKey, record.userId);
     if (existing) {
+      this.assertIdempotentPayload(existing, record);
       return existing;
     }
 
@@ -125,9 +148,13 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
       throw new Error(`Commitment ${record.id} already exists`);
     }
 
+    const now = new Date();
     const created: CommitmentRecord = {
       ...record,
-      version: record.version ?? 1,
+      state: INITIAL_STATE,
+      version: 1,
+      createdAt: record.createdAt instanceof Date ? record.createdAt : now,
+      updatedAt: record.updatedAt instanceof Date ? record.updatedAt : now,
     };
     this.store.set(created.id, created);
     return created;
@@ -149,7 +176,14 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
       throw new OptimisticLockError(record.id, expectedVersion, current.version);
     }
 
-    this.assertValidTransition(record.id, current.state, record.state);
+    this.assertValidTransition(current.id, current.state, record.state);
+    this.assertImmutableFields(current, record);
+
+    // Idempotent no-op: re-applying the same state with the same terms must not
+    // produce a new version or invalidate concurrent readers.
+    if (current.state === record.state) {
+      return current;
+    }
 
     const updated: CommitmentRecord = {
       ...current,
@@ -157,6 +191,7 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
       id: current.id,
       userId: current.userId,
       idempotencyKey: current.idempotencyKey,
+      state: record.state,
       version: current.version + 1,
       updatedAt: new Date(),
     };
@@ -171,7 +206,13 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
   }
 
   async search(userId: string, query: string, state?: string): Promise<CommitmentRecord[]> {
+    if (typeof query !== "string") {
+      throw new Error("Search query must be a string");
+    }
     const normalized = query.trim().toLowerCase();
+    if (state !== undefined && !VALID_STATES.has(state)) {
+      throw new Error(`Invalid state filter: ${state}`);
+    }
     return [...this.store.values()]
       .filter((record) => {
         if (record.userId !== userId) return false;
@@ -184,6 +225,6 @@ export class InMemoryCommitmentRepository implements CommitmentRepository {
         );
       })
       .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
-      .slice(0, 100);
+      .slice(0, MAX_SEARCH_RESULTS);
   }
 }
