@@ -104,6 +104,17 @@ const MAX_CONCURRENT_SEARCH_REQUESTS = 50;
  */
 let currentSearchRequests = 0;
 
+type ChainCommitments = Awaited<ReturnType<typeof getUserCommitmentsFromChain>>;
+
+/**
+ * Module-level single-flight table for on-chain commitment reads.
+ *
+ * Duplicate search requests for the same wallet and mode share one chain
+ * read. The promise is removed when the read settles so a later retry
+ * re-attempts the read instead of replaying a settled success or failure.
+ */
+const inflightChainReads = new Map<string, Promise<ChainCommitments>>();
+
 /**
  * Allowed `CommitmentStatus` filter values.
  * Maps user-facing values to the on-chain `ChainCommitmentStatus` type.
@@ -219,6 +230,50 @@ interface SearchCacheValue {
   };
 }
 
+// ─── Cache payload schema ─────────────────────────────────────────────────────
+
+const SearchCacheValueSchema = z.object({
+  data: z.array(
+    z.object({
+      commitmentId: z.string().min(1),
+      ownerAddress: z.string().min(1),
+      asset: z.string().min(1),
+      amount: z.string(),
+      status: z.enum(COMMITMENT_STATUS_VALUES),
+      riskType: z.string(),
+      complianceScore: z.number().min(0).max(100),
+      currentValue: z.string(),
+      feeEarned: z.string(),
+      violationCount: z.number().int().min(0),
+      createdAt: z.string(),
+      expiresAt: z.string(),
+    }),
+  ),
+  meta: z.record(z.string(), z.any()),
+  filters: z.record(z.string(), z.any()),
+  snapshot: z
+    .object({
+      queryKey: z.string(),
+      generatedAt: z.string(),
+      source: z.enum(['cache', 'chain']),
+      rawCount: z.number().int().min(0),
+      processedCount: z.number().int().min(0),
+      rejectedRecords: z.number().int().min(0),
+      duplicateRecords: z.number().int().min(0),
+      truncated: z.boolean(),
+    })
+    .optional(),
+  invariants: z.any().optional(),
+  _telemetry: z
+    .object({
+      returnedCount: z.number().int().min(0),
+      total: z.number().int().min(0),
+      filteredCount: z.number().int().min(0),
+      truncated: z.boolean(),
+    })
+    .optional(),
+});
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -260,6 +315,40 @@ function buildSearchCacheKey(
 
 function normalizeAddress(address: string): string {
   return address.trim().toUpperCase();
+}
+
+/**
+ * Returns a single shared promise for the wallet's on-chain commitment read.
+ *
+ * If a read for the same owner and mode (normal or refresh) is already in
+ * flight, all search requests await the same promise. The entry is removed
+ * when the read settles so a later retry issues a fresh chain read rather
+ * than replaying a settled success or failure.
+ */
+function fetchCommitmentsWithSingleFlight(
+  ownerAddress: string,
+  mode: 'normal' | 'refresh' = 'normal',
+): Promise<ChainCommitments> {
+  const normalizedOwner = normalizeAddress(ownerAddress);
+  const operationKey = `${normalizedOwner}:${mode}`;
+  const existing = inflightChainReads.get(operationKey);
+  if (existing) return existing;
+
+  const read = getUserCommitmentsFromChain(normalizedOwner);
+  inflightChainReads.set(operationKey, read);
+
+  read
+    .finally(() => {
+      if (inflightChainReads.get(operationKey) === read) {
+        inflightChainReads.delete(operationKey);
+      }
+    })
+    .catch(() => {
+      // Cleanup-only derived promise; the original `read` rejection is
+      // observed by the caller awaiting `fetchCommitmentsWithSingleFlight`.
+    });
+
+  return read;
 }
 
 function parseFiniteNumber(value: unknown, fallback = 0): number {
@@ -493,6 +582,22 @@ export const GET = withApiHandler(
     }
 
     if (cached !== null) {
+      const validation = SearchCacheValueSchema.safeParse(cached);
+      if (!validation.success) {
+        logWarn(
+          req,
+          '[api/commitments/search] cached value failed validation; treating as cache miss',
+          {
+            correlationId,
+            ownerAddress: normalizedOwnerAddress,
+            issues: validation.error.issues,
+          },
+        );
+        cached = null;
+      }
+    }
+
+    if (cached !== null) {
       const durationMs = Date.now() - startedAt;
       logInfo(req, '[api/commitments/search] served from cache', {
         correlationId,
@@ -528,7 +633,20 @@ export const GET = withApiHandler(
 
     // 5. Fetch from chain
     const chainStartedAt = Date.now();
-    const commitments = await getUserCommitmentsFromChain(normalizedOwnerAddress);
+    const readMode = queryResult.data.refresh === 'true' ? 'refresh' : 'normal';
+    let commitments: ChainCommitments;
+    try {
+      commitments = await fetchCommitmentsWithSingleFlight(normalizedOwnerAddress, readMode);
+    } catch (chainError) {
+      logWarn(req, '[api/commitments/search] chain read failed; retrying once', {
+        correlationId,
+        ownerAddress: normalizedOwnerAddress,
+        error: chainError instanceof Error ? chainError.message : String(chainError),
+      });
+      // The failed read has already been evicted from the single-flight table;
+      // retry with a fresh chain read so we do not replay a settled failure.
+      commitments = await fetchCommitmentsWithSingleFlight(normalizedOwnerAddress, readMode);
+    }
     const chainDurationMs = Date.now() - chainStartedAt;
 
     let truncated = false;
