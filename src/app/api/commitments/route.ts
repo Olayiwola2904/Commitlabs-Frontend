@@ -18,7 +18,7 @@ import { withApiHandler } from '@/lib/backend/withApiHandler';
 const MAX_CHAIN_COMMITMENTS_PROCESSED = 5000;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const PENDING_TTL_MS = 10 * 60 * 1000;
-const UNKNOWN_TTL_MS = 60 * 60 * 1000;
+const UNKNOWN_TTL_MS = IDEMPOTENCY_TTL_MS;
 type IdempotencyStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'UNKNOWN';
 type IdempotencyEntry = {
   status: IdempotencyStatus;
@@ -28,6 +28,18 @@ type IdempotencyEntry = {
   expiresAt: number;
 };
 const idempotencyStore = new Map<string, IdempotencyEntry>();
+const idempotencyLocks = new Map<string, Promise<unknown>>();
+
+function withIdempotencyLock<T>(key: string, action: () => T | Promise<T>): Promise<T> {
+  const previous = idempotencyLocks.get(key) ?? Promise.resolve();
+  const current = previous.then(action, action);
+  idempotencyLocks.set(key, current);
+  const cleanup = () => {
+    if (idempotencyLocks.get(key) === current) idempotencyLocks.delete(key);
+  };
+  void current.then(cleanup, cleanup);
+  return current;
+}
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
@@ -95,6 +107,52 @@ const CreateSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+type CommitmentPreparation =
+  | { kind: 'PROCEED'; data: { ownerAddress: string; asset: string; amount: string; durationDays: number; maxLossBps: number; metadata?: Record<string, unknown> } }
+  | { kind: 'PENDING' }
+  | { kind: 'SUCCESS'; result: unknown }
+  | { kind: 'UNKNOWN' }
+  | { kind: 'CONFLICT' };
+
+/**
+ * Idempotency state machine for commitment creation:
+ * - No entry -> PENDING when a create attempt is claimed.
+ * - PENDING -> SUCCESS after an unambiguous on-chain success.
+ * - PENDING -> FAILED after a non-ambiguous on-chain failure.
+ * - PENDING -> UNKNOWN when the pending lease expires or an ambiguous error occurs.
+ * - FAILED -> PENDING when the same payload is retried.
+ * - UNKNOWN and SUCCESS are not retryable until TTL expiry.
+ * - Validation failures occur before PENDING is written and leave no idempotency state.
+ * - Client cancellation does not cancel the on-chain attempt; it settles later.
+ */
+function prepareCommitmentCreation(
+  idempotencyKey: string,
+  requestHash: string,
+  parsedBody: unknown,
+): Promise<CommitmentPreparation> {
+  return withIdempotencyLock(idempotencyKey, () => {
+    const existing = getIdempotency(idempotencyKey);
+    if (existing) {
+      if (existing.requestHash !== requestHash) return { kind: 'CONFLICT' };
+      if (existing.status === 'PENDING') return { kind: 'PENDING' };
+      if (existing.status === 'SUCCESS') return { kind: 'SUCCESS', result: existing.result };
+      if (existing.status === 'UNKNOWN') return { kind: 'UNKNOWN' };
+      // FAILED entries are definitive, non-ambiguous failures; retrying the
+      // same payload under the same key is therefore safe.
+    }
+    const bodyResult = CreateSchema.safeParse(parsedBody);
+    if (!bodyResult.success) throw new ValidationError('Invalid request body', bodyResult.error.issues);
+    const { ownerAddress, asset, amount, durationDays, maxLossBps, metadata } = bodyResult.data;
+    try { validateSupportedAsset(asset, 'asset'); } catch { throw new ValidationError('Asset is not supported. Supported assets: XLM, USDC.'); }
+    try { validateStellarAddress(ownerAddress, 'ownerAddress'); } catch { throw new ValidationError('Invalid ownerAddress: must be a valid Stellar address (G... format).'); }
+    setPending(idempotencyKey, requestHash);
+    return {
+      kind: 'PROCEED',
+      data: { ownerAddress, asset, amount, durationDays, maxLossBps, ...(metadata !== undefined ? { metadata } : {}) },
+    };
+  });
+}
+
 const COMMITMENTS_CORS_POLICY = { GET: { access: 'first-party' as const }, POST: { access: 'first-party' as const } } satisfies CorsRoutePolicy;
 export const OPTIONS = createCorsOptionsHandler(COMMITMENTS_CORS_POLICY);
 
@@ -152,20 +210,12 @@ export const POST = withApiHandler(
     if (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 255) return fail('BAD_REQUEST', 'Idempotency-Key header is required and must be between 8 and 255 characters', undefined, 400, correlationId);
     const parsed = await parseJsonWithLimit(req, { limitBytes: JSON_BODY_LIMITS.commitmentsCreate });
     const requestHash = hashRequestPayload(parsed ?? {});
-    const existing = getIdempotency(idempotencyKey);
-    if (existing) {
-      if (existing.requestHash !== requestHash) return fail('CONFLICT', 'Idempotency-Key was already used with a different request payload', undefined, 409, correlationId);
-      if (existing.status === 'PENDING') return fail('CONFLICT', 'A request with this Idempotency-Key is already being processed. Retry after a moment.', undefined, 409, correlationId);
-      if (existing.status === 'SUCCESS') return ok(existing.result, undefined, 200, correlationId);
-      if (existing.status === 'FAILED') return fail(existing.error!.code as any, existing.error!.message, undefined, existing.error!.status, correlationId);
-      return fail('CONFLICT', 'The previous request outcome is unknown. Review on-chain state before retrying.', undefined, 409, correlationId);
-    }
-    const bodyResult = CreateSchema.safeParse(parsed ?? {});
-    if (!bodyResult.success) throw new ValidationError('Invalid request body', bodyResult.error.issues);
-    const { ownerAddress, asset, amount, durationDays, maxLossBps, metadata } = bodyResult.data;
-    try { validateSupportedAsset(asset, 'asset'); } catch { throw new ValidationError('Asset is not supported. Supported assets: XLM, USDC.'); }
-    try { validateStellarAddress(ownerAddress, 'ownerAddress'); } catch { throw new ValidationError('Invalid ownerAddress: must be a valid Stellar address (G... format).'); }
-    setPending(idempotencyKey, requestHash);
+    const preparation = await prepareCommitmentCreation(idempotencyKey, requestHash, parsed ?? {});
+    if (preparation.kind === 'PENDING') return fail('CONFLICT', 'A request with this Idempotency-Key is already being processed. Retry after a moment.', undefined, 409, correlationId);
+    if (preparation.kind === 'CONFLICT') return fail('CONFLICT', 'Idempotency-Key was already used with a different request payload', undefined, 409, correlationId);
+    if (preparation.kind === 'SUCCESS') return ok(preparation.result, undefined, 200, correlationId);
+    if (preparation.kind === 'UNKNOWN') return fail('CONFLICT', 'The previous request outcome is unknown. Review on-chain state before retrying.', undefined, 409, correlationId);
+    const { ownerAddress, asset, amount, durationDays, maxLossBps, metadata } = preparation.data;
     let result;
     try {
       result = await createCommitmentOnChain({ ownerAddress, asset, amount, durationDays, maxLossBps, ...(metadata !== undefined ? { metadata } : {}) }, { requestId: correlationId });
