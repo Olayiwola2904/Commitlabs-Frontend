@@ -158,8 +158,8 @@ const CommitmentSearchQuerySchema = z.object({
 
   // Pagination params are parsed separately by pagination.ts utilities,
   // but we accept them in the same query string.
-  page: z.coerce.number().min(1).default(1).optional(),
-  pageSize: z.coerce.number().min(1).max(MAX_PAGE_SIZE).default(10).optional(),
+  page: z.coerce.number().min(1).default(1),
+  pageSize: z.coerce.number().min(1).max(MAX_PAGE_SIZE).default(10),
 
   // Sorting params are also parsed separately, but we validate allowed
   // values here to fail fast and enforce Invariant I4.
@@ -203,6 +203,20 @@ interface SearchSnapshot {
   rejectedRecords: number;
   duplicateRecords: number;
   truncated: boolean;
+}
+
+interface SearchCacheValue {
+  data: CommitmentSearchItem[];
+  meta: Record<string, unknown>;
+  filters: Record<string, unknown>;
+  snapshot?: SearchSnapshot;
+  invariants?: SearchInvariants;
+  _telemetry?: {
+    returnedCount: number;
+    total: number;
+    filteredCount: number;
+    truncated: boolean;
+  };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -459,19 +473,24 @@ export const GET = withApiHandler(
       pageSize: paginationParams.pageSize,
     });
 
-    const cached = await cache.get<{
-      data: CommitmentSearchItem[];
-      meta: Record<string, unknown>;
-      filters: Record<string, unknown>;
-      snapshot?: SearchSnapshot;
-      invariants?: SearchInvariants;
-      _telemetry?: {
-        returnedCount: number;
-        total: number;
-        filteredCount: number;
-        truncated: boolean;
-      };
-    }>(cacheKey);
+    let cached: SearchCacheValue | null = null;
+
+    if (queryResult.data.refresh === 'true') {
+      logInfo(req, '[api/commitments/search] refresh requested; bypassing search cache', {
+        correlationId,
+        ownerAddress: normalizedOwnerAddress,
+      });
+    } else {
+      try {
+        cached = await cache.get<SearchCacheValue>(cacheKey);
+      } catch (cacheError) {
+        logWarn(req, '[api/commitments/search] cache read failed; falling through to chain', {
+          correlationId,
+          ownerAddress: normalizedOwnerAddress,
+          error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+        });
+      }
+    }
 
     if (cached !== null) {
       const durationMs = Date.now() - startedAt;
@@ -608,11 +627,19 @@ export const GET = withApiHandler(
     };
 
     // 12. Cache for short TTL
-    await cache.set(
-      cacheKey,
-      { ...responsePayload, _telemetry: telemetryPayload },
-      CacheTTL.COMMITMENT_SEARCH,
-    );
+    try {
+      await cache.set(
+        cacheKey,
+        { ...responsePayload, _telemetry: telemetryPayload },
+        CacheTTL.COMMITMENT_SEARCH,
+      );
+    } catch (cacheError) {
+      logWarn(req, '[api/commitments/search] cache write failed; returning fresh chain result', {
+        correlationId,
+        ownerAddress: normalizedOwnerAddress,
+        error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+      });
+    }
 
     logInfo(req, '[api/commitments/search] served from chain', {
       correlationId,
