@@ -62,7 +62,7 @@ jobs:
         run: npm ci
 
       - name: Validate OpenAPI spec
-        run: bash validate-openapi.sh
+        run: bash scripts/validate-openapi.sh
 
       - name: Check API route coverage
         run: bash scripts/check-route-coverage.sh
