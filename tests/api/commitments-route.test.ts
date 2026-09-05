@@ -421,7 +421,7 @@ describe('POST /api/commitments', () => {
 
       expect(result.status).toBe(400);
       expect(result.data.success).toBe(false);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
       expect(result.data.error.message).toContain('ownerAddress');
     });
 
@@ -435,7 +435,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
     });
 
     it('returns 400 for missing asset', async () => {
@@ -449,7 +449,7 @@ describe('POST /api/commitments', () => {
 
       expect(result.status).toBe(400);
       expect(result.data.success).toBe(false);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
       expect(result.data.error.message).toContain('asset');
     });
 
@@ -487,7 +487,7 @@ describe('POST /api/commitments', () => {
 
       expect(result.status).toBe(400);
       expect(result.data.success).toBe(false);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
       expect(result.data.error.message).toContain('Stellar address');
     });
 
@@ -501,7 +501,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
       expect(result.data.error.message).toContain('amount');
     });
 
@@ -515,7 +515,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
     });
 
     it('returns 400 for invalid durationDays', async () => {
@@ -528,7 +528,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
       expect(result.data.error.message).toContain('durationDays');
     });
 
@@ -542,7 +542,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
       expect(result.data.error.message).toContain('maxLossBps');
     });
 
@@ -556,7 +556,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
     });
   });
 
@@ -634,7 +634,7 @@ describe('POST /api/commitments', () => {
       const result = await parseResponse(response);
 
       expect(result.status).toBe(400);
-      expect(result.data.error.code).toBe('BAD_REQUEST');
+      expect(result.data.error.code).toBe('VALIDATION_ERROR');
     });
 
     it('includes x-correlation-id in response headers', async () => {
