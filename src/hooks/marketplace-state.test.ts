@@ -134,7 +134,7 @@ describe('usePaginatedListings — state machine transitions', () => {
     expect(result.current.listings.map((l) => l.id)).toEqual(['A', 'B']);
 
     await act(() => result.current.loadMore());
-    await waitFor(() => expect(fetchMock ?? dupFetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(dupFetch).toHaveBeenCalledTimes(2));
 
     expect(result.current.listings.map((l) => l.id)).toEqual(['A', 'B', 'C']);
   });
