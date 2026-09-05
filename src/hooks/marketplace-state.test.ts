@@ -7,27 +7,12 @@ import { useMarketplaceStats } from '@/hooks/useMarketplaceStats';
 // Fetch mock plumbing (shared)
 // ───────────────────────────────────────────────────────────────────────
 
-interface FetchCall {
-  url: string;
-  res: () => { status: number; json?: unknown; headers?: Record<string, string> } | Promise<{ status: number; json?: unknown; headers?: Record<string, string> }>;
-}
-
-const fetchCalls: FetchCall[] = [];
-
-function registerFetch(matcher: (url: string) => boolean, res: FetchCall['res']) {
-  fetchCalls.push({ url: matcher.toString(), res });
-}
-
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
-  fetchCalls.length = 0;
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-    for (let i = fetchCalls.length - 1; i >= 0; i--) {
-      // Fall through: try last registered first
-    }
     if (url.includes('/api/marketplace/listings')) {
       const qs = new URLSearchParams(url.split('?')[1] ?? '');
       const page = Number(qs.get('page') || 1);
