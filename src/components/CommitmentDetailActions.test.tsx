@@ -5,8 +5,8 @@
 // reason surfaced from an authoritative ownership check in the parent page,
 // not left permanently clickable regardless of who is viewing the page.
 
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CommitmentDetailActions } from './CommitmentDetailActions';
 
@@ -18,6 +18,8 @@ vi.mock('@/components/settlement/SettlementEligibilityChecklist', () => ({
 }));
 
 function noop() {}
+
+afterEach(cleanup);
 
 describe('CommitmentDetailActions — Report Issue authorization gating', () => {
   it('renders Report Issue as enabled when no disabled reason is given (backward compatible default)', () => {
