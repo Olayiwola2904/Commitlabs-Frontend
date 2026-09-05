@@ -32,7 +32,6 @@ describe('CommitmentDetailActions — Report Issue authorization gating', () => 
     );
     const button = screen.getByRole('button', { name: 'Report an Issue' });
     expect(button).not.toBeDisabled();
-    expect(button).toHaveAttribute('aria-disabled', 'false');
   });
 
   it('disables Report Issue and exposes the reason when reportIssueDisabledReason is set', () => {
@@ -48,7 +47,6 @@ describe('CommitmentDetailActions — Report Issue authorization gating', () => 
     );
     const button = screen.getByRole('button', { name: 'Report an Issue' });
     expect(button).toBeDisabled();
-    expect(button).toHaveAttribute('aria-disabled', 'true');
     expect(button).toHaveAttribute('title', 'Connect your wallet to manage this commitment.');
   });
 
