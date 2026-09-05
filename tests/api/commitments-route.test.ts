@@ -117,6 +117,7 @@ describe('GET /api/commitments', () => {
     vi.clearAllMocks();
     mockedRequireAuth.mockImplementation((req) => req as any);
     mockedCheckRateLimit.mockResolvedValue(true);
+    mockedValidateStellarAddress.mockReturnValue(true);
     mockedGetUserCommitmentsFromChain.mockResolvedValue(ALL_COMMITMENTS);
   });
 
@@ -336,8 +337,8 @@ describe('POST /api/commitments', () => {
     vi.clearAllMocks();
     mockedAssertMutationCsrf.mockReturnValue(undefined);
     mockedCheckRateLimit.mockResolvedValue(true);
-    mockedValidateSupportedAsset.mockReturnValue(undefined);
-    mockedValidateStellarAddress.mockReturnValue(undefined);
+    mockedValidateSupportedAsset.mockReturnValue(true);
+    mockedValidateStellarAddress.mockReturnValue(true);
     mockedCreateCommitmentOnChain.mockResolvedValue(mockCreateResult);
   });
 
